@@ -1,0 +1,7 @@
+# wandb
+wandb/*
+
+*/__pycache__/*
+
+# log
+log/*

@@ -1,4 +1,4 @@
-from dataset import Dataset
+from datasets import Dataset
 from tqdm.auto import tqdm
 import re, torch, os
 from utils import SimpleTokenizer, has_answer
@@ -25,7 +25,7 @@ def _preprocess_context(text, subset_name: str):
     text = re.sub(' +', ' ', text)
     return text
 
-def preprocess_text(dataset: Dataset, args) -> Dataset:
+def preprocess_text(dataset: Dataset) -> Dataset:
     dataset = dataset.map(lambda x: {"context": _preprocess_context(x["context"], x["subset"])}, desc="Preprocessing...")
     print("Before context preprocess: ", len(dataset))
     dataset = dataset.filter(lambda x: x["context"] is not None)
@@ -82,14 +82,14 @@ def query_embedding(model, tokenizer, dataset: Dataset, args):
     assert len(result) == len(queries), "Length doesn't match"
     return dataset.add_column("query_embedding", result)
 
-def split_sentence_and_make_short_context(dataset: Dataset, nlp, args):
+def split_sentence_and_make_short_context(dataset: Dataset, nlp):
     simple_tokenizer = SimpleTokenizer()
     answer_passages = []
     answer_sents = []
     answers_in_context = []
-    for i in tqdm(range(0, len(dataset), args.batch_size), desc="Splitting sentence..."):
-        batch = dataset[i:i+args.batch_size]
-        docs = list(nlp.pipe(batch["context"], batch_size=args.batch_size, disable=["ner"]))
+    for i in tqdm(range(0, len(dataset), 1024), desc="Splitting sentence..."):
+        batch = dataset[i:i+1024]
+        docs = list(nlp.pipe(batch["context"], batch_size=1024, disable=["ner"]))
         answers = batch["answers"]
         for doc, answer in zip(docs, answers):
             answer_sent_idx = -1
@@ -98,7 +98,7 @@ def split_sentence_and_make_short_context(dataset: Dataset, nlp, args):
                 if has_answer(answer, sent, simple_tokenizer):
                     start_idx, end_idx = max(0, idx-3), min(len(sents), idx+4)
                     answer_passage = " ".join([sent.strip() for sent in sents[start_idx:end_idx]])
-                    while len(answer_passage.split()) < args.ctx_avg_len:
+                    while len(answer_passage.split()) < 70:
                         if start_idx == 0 and end_idx == len(sents):
                             break
                         elif start_idx == 0 and end_idx < len(sents):
@@ -137,34 +137,34 @@ def split_sentence_and_make_short_context(dataset: Dataset, nlp, args):
     dataset = dataset.add_column("answer_in_context", answers_in_context)
     dataset = dataset.filter(lambda x: x["short_context"] is not None, num_proc=NUM_PROC)
     print("After split: ", len(dataset))
-    dataset = dataset.filter(lambda x: len(x["short_context"].split())< args.ctx_max_len and len(x["short_context"].split()) > args.ctx_min_len, num_proc=NUM_PROC)
+    dataset = dataset.filter(lambda x: len(x["short_context"].split())< 120 and len(x["short_context"].split()) > 70, num_proc=NUM_PROC)
     print("After context length filtering: ", len(dataset))
-    dataset = dataset.filter(lambda x: all([len(ans.split())< args.answer_max_len for ans in x["answer_in_context"]]), num_proc=NUM_PROC, desc="Max answer len filtering...")
+    dataset = dataset.filter(lambda x: all([len(ans.split())<= 7 for ans in x["answer_in_context"]]), num_proc=NUM_PROC, desc="Max answer len filtering...")
     print("After answer length filtering: ", len(dataset))
     return dataset
 
-def query_embedding(model, tokenizer, dataset: Dataset, args):
+def query_embedding(model, tokenizer, dataset: Dataset):
     queries = dataset["masked_query"]
     result = []
-    for i in tqdm(range(0, len(queries), args.batch_size), desc="Embedding..."):
-        batch = queries[i:i+args.batch_size]
+    for i in tqdm(range(0, len(queries), 1024), desc="Embedding..."):
+        batch = queries[i:i+1024]
         output = tokenizer(batch, padding="max_length", truncation=True, max_length=64, return_tensors="pt").to("cuda")
         with torch.no_grad():
-            embeddings = model(**output).pooler_output.detach().cpu().numpy() # [args.batch_size, hidden_dim]
+            embeddings = model(**output).pooler_output.detach().cpu().numpy() # [1024, hidden_dim]
         result.extend([emb for emb in embeddings])
     assert len(result) == len(queries), "Length doesn't match"
     return dataset.add_column("query_embedding", result)
 
 
-def remove_duplicate_by_similarity(dataset: Dataset, tokenizer, model, args):
+def remove_duplicate_by_similarity(dataset: Dataset):
     questions = dataset["question"]
     result = []
     model = SentenceTransformer('sentence-transformers/all-MiniLM-L12-v2', device="cuda")
     model.max_seq_length = 64
     with torch.no_grad():
-        for i in tqdm(range(0, len(questions), args.batch_size), desc="Embedding..."):
-            batch = questions[i:i+args.batch_size]
-            result.extend(model.encode(batch, batch_size=args.batch_size, show_progress_bar=False))
+        for i in tqdm(range(0, len(questions), 1024), desc="Embedding..."):
+            batch = questions[i:i+1024]
+            result.extend(model.encode(batch, batch_size=1024, show_progress_bar=False))
     torch.cuda.empty_cache()
     matrix = cp.array([v/np.linalg.norm(v) for v in result], dtype=cp.float16)
     key_matrix_indices = []
@@ -175,8 +175,29 @@ def remove_duplicate_by_similarity(dataset: Dataset, tokenizer, model, args):
             current_matrix = matrix[i:i+1]
             key_matrix_subset = matrix[key_matrix_indices]
             similarity = cp.dot(current_matrix, key_matrix_subset.T)
-            if not cp.any(similarity >= args.remove_duplicate_thres):
+            if not cp.any(similarity >= 0.9):
                 key_matrix_indices.append(i)
     print(f"Remove duplicates by similarity-> Before : {len(dataset)} | After : {len(key_matrix_indices)}")
     dataset = dataset.select(key_matrix_indices, writer_batch_size=50000)
     return dataset
+
+def determine_answerability(ex) -> dict:
+    def hasanswer(ctxs) -> bool:
+        return any([c["hasanswer"] for c in ctxs])
+    def answerable(ctxs) -> bool:
+        res = []
+        for ctx in ctxs:
+            hasanswer, entail = ctx["hasanswer"], ctx["nli"]
+            if hasanswer and (entail in ["entailment", "contradiction"]):
+                res.append("answerable")
+            elif (not hasanswer) and (entail != "entailment"):
+                res.append("unanswerable")
+            else:
+                res.append("uncertain")
+        if res.count("answerable") >= 1:
+            return "answerable"
+        elif res.count("unanswerable") == 5:
+            return "unanswerable"
+        else:
+            return "uncertain"
+    return {"answerable": answerable(ex["ctxs"]), "hasanswer": hasanswer(ex["ctxs"])}
