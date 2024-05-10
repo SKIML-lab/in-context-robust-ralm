@@ -14,7 +14,7 @@ def _load_dataset(args):
     dataset = dataset.map(lambda x: determine_answerability(x))
     if args.filter_uncertain:
         print("Before filtering :", len(dataset))
-        dataset = dataset.filter(lambda x: x["answerable"] != "uncertain")
+        dataset = dataset.filter(lambda x: x["answerable"] == "uncertain")
         print("After filtering uncertain: ", len(dataset))
     if args.test:
         dataset = dataset.shuffle(seed=42).select(range(args.test_size))
@@ -23,10 +23,12 @@ def _load_dataset(args):
 def main(dataset: Dataset, args):
     demons = load_demon_test(args)
     dataset = make_incontext_prompt(dataset, demons, args)
-    dataset = dataset.map(lambda x: {"pred" : gpt_chat_completion(x["prompt"])}, num_proc=args.gpt_batch_size)
-    #dataset = dataset.add_column("pred", ["unanswerable"]*args.dataset_size)
+    if args.dummy_data:
+        dataset = dataset.map(lambda x: {"pred" : "unanswerable"}, num_proc=args.gpt_batch_size)
+    else:
+        dataset = dataset.map(lambda x: {"pred" : gpt_chat_completion(x["prompt"])}, num_proc=args.gpt_batch_size)
     if args.task == "unans":
-        cal_unans(dataset, args)
+        df = cal_unans(dataset, args)
     elif args.task == "adv_unans":
         pass
     elif args.task == "conflict":
@@ -53,6 +55,7 @@ if __name__ == "__main__":
     
     # Configs for experiment
     parser.add_argument("--test", type=str2bool, required=False, default=False)
+    parser.add_argument("--dummy_data", type=str2bool, required=False, default=False)
     parser.add_argument("--test_size", type=int, required=False, default=1000)
     parser.add_argument("--gpt_batch_size", type=int, required=False, default=4)
     parser.add_argument("--filter_uncertain", type=str2bool, required=False, default=False)
@@ -61,7 +64,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_ctxs", type=int, required=False, default=5)
 
     # Configs for 
-    parser.add_argument("--output_dir", type=str, required=False, default="../data/case")
+    parser.add_argument("--output_dir", type=str, required=False, default="./data/case")
     
     args = parser.parse_args()
     configs = vars(args)

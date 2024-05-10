@@ -13,10 +13,12 @@ def str2bool(v):
 
 def make_run_name(args):
     run_name = f"{args.dataset.split('_')[-1]}".upper()
+    if args.filter_uncertain:
+        run_name += "-filtered-"
     if args.task == "unans":
         run_name += "-unans-"
     elif args.task == "conflict":
-        run_name += "-conf"
+        run_name += "-conf-"
     run_name += f"{args.demons}-Q:{args.qa_demon_size}-U:{args.unans_demon_size}-C:{args.conflict_demon_size}"
     return run_name
 

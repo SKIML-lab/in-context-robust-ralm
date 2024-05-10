@@ -188,6 +188,10 @@ def determine_answerability(ex) -> dict:
         res = []
         for ctx in ctxs:
             hasanswer, entail = ctx["hasanswer"], ctx["nli"]
+            ### Q - A -> Answer sentence
+            ### Answer sentence -> hypothesis
+            ### Retrieved context -> premise
+            ### NLI (premise, hypothesis) -> entailment
             if hasanswer and (entail in ["entailment", "contradiction"]):
                 res.append("answerable")
             elif (not hasanswer) and (entail != "entailment"):
