@@ -2,7 +2,7 @@ import os
 from argparse import ArgumentParser, Namespace
 from typing import Dict, List, Tuple
 from datasets import load_dataset, Dataset
-from llm import gpt_chat_completion
+from llm import gpt_chat_completion, vllm_completion
 from utils import str2bool
 from prompts import load_demon_test, make_incontext_prompt
 from evaluation import cal_unans
@@ -14,7 +14,7 @@ def _load_dataset(args):
     dataset = dataset.map(lambda x: determine_answerability(x))
     if args.filter_uncertain:
         print("Before filtering :", len(dataset))
-        dataset = dataset.filter(lambda x: x["answerable"] == "uncertain")
+        dataset = dataset.filter(lambda x: x["answerable"] != "uncertain")
         print("After filtering uncertain: ", len(dataset))
     if args.test:
         dataset = dataset.shuffle(seed=42).select(range(args.test_size))
@@ -25,8 +25,11 @@ def main(dataset: Dataset, args):
     dataset = make_incontext_prompt(dataset, demons, args)
     if args.dummy_data:
         dataset = dataset.map(lambda x: {"pred" : "unanswerable"}, num_proc=args.gpt_batch_size)
+    if args.llm == "chatgpt":
+        dataset = dataset.map(lambda x: {"pred" : gpt_chat_completion(x["prompt"], args)}, num_proc=args.gpt_batch_size)
     else:
-        dataset = dataset.map(lambda x: {"pred" : gpt_chat_completion(x["prompt"])}, num_proc=args.gpt_batch_size)
+        output = vllm_completion(dataset["prompt"], args)
+        dataset = dataset.add_column("pred", output)
     if args.task == "unans":
         df = cal_unans(dataset, args)
     elif args.task == "adv_unans":
@@ -61,7 +64,9 @@ if __name__ == "__main__":
     parser.add_argument("--filter_uncertain", type=str2bool, required=False, default=False)
 
     # Configs for RAG
+    parser.add_argument("--llm", type=str, required=False, default="chatgpt")
     parser.add_argument("--num_ctxs", type=int, required=False, default=5)
+    parser.add_argument("--max_new_tokens", type=int, required=False, default=100)
 
     # Configs for 
     parser.add_argument("--output_dir", type=str, required=False, default="./data/case")
