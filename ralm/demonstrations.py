@@ -12,11 +12,11 @@ from preprocess import (preprocess_text,
 
 def preprocess_case(case_dataset: Dataset, args: Namespace) -> Dataset:
     nlp = spacy.load("en_core_web_trf")
-    case_datsaet = query_masking(nlp, case_datsaet)
-    case_datsaet = remove_duplicate(case_datsaet)
-    case_datsaet = preprocess_text(case_datsaet, args)
-    case_dataset = split_sentence_and_make_short_context(case_dataset, nlp, args)
-    #case_dataset = query_embedding(model, tokenizer, case_dataset, args)
+    case_dataset = query_masking(nlp, case_dataset)
+    case_dataset = remove_duplicate(case_dataset)
+    case_dataset = preprocess_text(case_dataset, args)
+    #case_dataset = split_sentence_and_make_short_context(case_dataset, nlp, args)
+    case_dataset = query_embedding(model, tokenizer, case_dataset, args)
     case_dataset = remove_duplicate_by_similarity(case_dataset)
     case_dataset = case_dataset.remove_columns(["context","context_tokens","question_tokens","detected_answers"])
     case_dataset = case_dataset.rename_column("short_context", "context")
