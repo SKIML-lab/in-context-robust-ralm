@@ -8,3 +8,6 @@ log/*
 
 # data
 data/*
+
+# loading file
+load.py
