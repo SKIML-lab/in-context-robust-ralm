@@ -3,16 +3,19 @@ from tqdm.auto import tqdm
 import re, torch, os
 from utils import SimpleTokenizer, has_answer
 from sentence_transformers import SentenceTransformer
-import cupy as cp
+import torch
+import numpy as np
+from transformers import AutoTokenizer, DPRQuestionEncoder
+# import cupy as cp
 import numpy as np
 
 NUM_PROC = os.cpu_count()
 
-def _preprocess_context(text, subset_name: str):
-    if subset_name == "NewsQA":
-        start = text.find("--")
-        end = start + 2
-        text = text[end:]
+def _preprocess_context(text):
+    # if subset_name == "NewsQA":
+    #     start = text.find("--")
+    #     end = start + 2
+    #     text = text[end:]
     if ("<Table>" in text) or ("<Ol>" in text) or ("<Li>" in text) or ("<Tr>" in text):
         return None
     text = text.replace("<P>", "")
@@ -26,7 +29,7 @@ def _preprocess_context(text, subset_name: str):
     return text
 
 def preprocess_text(dataset: Dataset) -> Dataset:
-    dataset = dataset.map(lambda x: {"context": _preprocess_context(x["context"], x["subset"])}, desc="Preprocessing...")
+    dataset = dataset.map(lambda x: {"context": _preprocess_context(x["context"])}, desc="Preprocessing...")
     print("Before context preprocess: ", len(dataset))
     dataset = dataset.filter(lambda x: x["context"] is not None)
     print("After context preprocess: ", len(dataset))
@@ -70,17 +73,7 @@ def remove_duplicate(data: Dataset):
     filtered_data = data.select(result_idxs, writer_batch_size=50000)
     return filtered_data
 
-def query_embedding(model, tokenizer, dataset: Dataset, args):
-    queries = dataset["masked_query"]
-    result = []
-    for i in tqdm(range(0, len(queries), args.batch_size), desc="Embedding..."):
-        batch = queries[i:i+args.batch_size]
-        output = tokenizer(batch, padding="max_length", truncation=True, max_length=64, return_tensors="pt").to("cuda")
-        with torch.no_grad():
-            embeddings = model(**output).pooler_output.detach().cpu().numpy() # [args.batch_size, hidden_dim]
-        result.extend([emb for emb in embeddings])
-    assert len(result) == len(queries), "Length doesn't match"
-    return dataset.add_column("query_embedding", result)
+
 
 def split_sentence_and_make_short_context(dataset: Dataset, nlp):
     simple_tokenizer = SimpleTokenizer()
@@ -143,17 +136,25 @@ def split_sentence_and_make_short_context(dataset: Dataset, nlp):
     print("After answer length filtering: ", len(dataset))
     return dataset
 
-def query_embedding(model, tokenizer, dataset: Dataset):
+def query_embedding(dataset: Dataset):
     queries = dataset["masked_query"]
     result = []
+
+    tokenizer = AutoTokenizer.from_pretrained("facebook/dpr-question_encoder-single-nq-base")
+    model = DPRQuestionEncoder.from_pretrained("facebook/dpr-question_encoder-single-nq-base").to("cuda")
+    model.eval()
+
     for i in tqdm(range(0, len(queries), 1024), desc="Embedding..."):
         batch = queries[i:i+1024]
         output = tokenizer(batch, padding="max_length", truncation=True, max_length=64, return_tensors="pt").to("cuda")
         with torch.no_grad():
             embeddings = model(**output).pooler_output.detach().cpu().numpy() # [1024, hidden_dim]
         result.extend([emb for emb in embeddings])
-    assert len(result) == len(queries), "Length doesn't match"
-    return dataset.add_column("query_embedding", result)
+    
+    # Normalize the embeddings
+    normalized_arrays = [emb / np.linalg.norm(emb) if np.linalg.norm(emb) > 0 else emb for emb in result]
+    assert len(normalized_arrays) == len(queries), "Length doesn't match"
+    return dataset.add_column("query_embedding", normalized_arrays)
 
 
 def remove_duplicate_by_similarity(dataset: Dataset):
@@ -166,7 +167,7 @@ def remove_duplicate_by_similarity(dataset: Dataset):
             batch = questions[i:i+1024]
             result.extend(model.encode(batch, batch_size=1024, show_progress_bar=False))
     torch.cuda.empty_cache()
-    matrix = cp.array([v/np.linalg.norm(v) for v in result], dtype=cp.float16)
+    matrix = np.array([v/np.linalg.norm(v) for v in result], dtype=np.float16)
     key_matrix_indices = []
     for i in tqdm(range(len(matrix)), desc="Removing duplicates by similarity..."):
         if len(key_matrix_indices) == 0:
@@ -174,8 +175,8 @@ def remove_duplicate_by_similarity(dataset: Dataset):
         else:
             current_matrix = matrix[i:i+1]
             key_matrix_subset = matrix[key_matrix_indices]
-            similarity = cp.dot(current_matrix, key_matrix_subset.T)
-            if not cp.any(similarity >= 0.9):
+            similarity = np.dot(current_matrix, key_matrix_subset.T)
+            if not np.any(similarity >= 0.9):
                 key_matrix_indices.append(i)
     print(f"Remove duplicates by similarity-> Before : {len(dataset)} | After : {len(key_matrix_indices)}")
     dataset = dataset.select(key_matrix_indices, writer_batch_size=50000)
