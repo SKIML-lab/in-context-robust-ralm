@@ -1,4 +1,5 @@
 from openai import OpenAI
+from vllm import LLM
 
 def gpt_chat_completion(prompt: str, client = None):
     if not client:
@@ -24,3 +25,10 @@ def gpt_chat_completion(prompt: str, client = None):
                 return None
             cnt += 1
     return response.choices[0].message.content.strip()
+
+def llama_chat_completion(prompt: str, client= None):
+    llm= LLM(model= 'meta-llama/Meta-Llama-3-70B-Instruct',
+             temperature= 0,
+             max_new_tokens= 50)
+    output= llm.generate(prompt)
+    return output
