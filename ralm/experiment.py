@@ -2,7 +2,7 @@ import os
 from argparse import ArgumentParser, Namespace
 from typing import Dict, List, Tuple
 from datasets import load_dataset, Dataset
-from llm import gpt_chat_completion
+from llm import gpt_chat_completion, llama_chat_completion
 from utils import str2bool
 from prompts import load_demon_test, make_incontext_prompt
 from evaluation import cal_unans
@@ -26,7 +26,10 @@ def main(dataset: Dataset, args):
     if args.dummy_data:
         dataset = dataset.map(lambda x: {"pred" : "unanswerable"}, num_proc=args.gpt_batch_size)
     else:
-        dataset = dataset.map(lambda x: {"pred" : gpt_chat_completion(x["prompt"])}, num_proc=args.gpt_batch_size)
+        if args.model == "gpt":
+            dataset = dataset.map(lambda x: {"pred" : gpt_chat_completion(x["prompt"])}, num_proc=args.gpt_batch_size)
+        elif args.model == "llama":
+            dataset = dataset.map(lambda x: {"pred" : llama_chat_completion(x["prompt"])}, num_proc=args.gpt_batch_size)
     if args.task == "unans":
         df = cal_unans(dataset, args)
     elif args.task == "adv_unans":
@@ -41,6 +44,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True, default="Atipico1/incontext_nq")
     parser.add_argument("--task", type=str, required=True, default="normal", choices=["noraml", "unans", "conflict"])
+    parser.add_argument("--model", type= str, required=True, default="gpt", choices=["gpt", "llama"])
 
     # Configs for demonstrations
     parser.add_argument("--demons_path", type=str, required=False, default="Atipico1/mrqa_v2_unans_1k")
