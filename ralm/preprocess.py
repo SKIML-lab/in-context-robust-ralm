@@ -1,6 +1,6 @@
 from datasets import Dataset
 from tqdm.auto import tqdm
-import re, torch, os
+import re, torch, os, string
 from utils import SimpleTokenizer, has_answer
 from sentence_transformers import SentenceTransformer
 import torch
@@ -8,7 +8,7 @@ import numpy as np
 from transformers import AutoTokenizer, DPRQuestionEncoder
 # import cupy as cp
 import numpy as np
-
+import spacy
 NUM_PROC = os.cpu_count()
 
 def _preprocess_context(text):
@@ -28,10 +28,11 @@ def _preprocess_context(text):
     text = re.sub(' +', ' ', text)
     return text
 
-def preprocess_text(dataset: Dataset) -> Dataset:
-    dataset = dataset.map(lambda x: {"context": _preprocess_context(x["context"])}, desc="Preprocessing...")
-    print("Before context preprocess: ", len(dataset))
-    dataset = dataset.filter(lambda x: x["context"] is not None)
+def preprocess_text(dataset: Dataset, args) -> Dataset:
+    if "mrqa" in args.case_dataset.lower():
+        dataset = dataset.map(lambda x: {"context": _preprocess_context(x["context"])}, desc="Preprocessing...")
+        print("Before context preprocess: ", len(dataset))
+    dataset = dataset.filter(lambda x: len(x["context"].split()) <= 150)
     print("After context preprocess: ", len(dataset))
     return dataset
 
@@ -206,3 +207,21 @@ def determine_answerability(ex) -> dict:
         else:
             return "uncertain"
     return {"answerable": answerable(ex["ctxs"]), "hasanswer": hasanswer(ex["ctxs"])}
+
+def normalize_answer(s: str):
+    if not s:
+        return ""
+    def remove_articles(text):
+        return re.sub(r"\b(a|an|the)\b", " ", text)
+
+    def white_space_fix(text):
+        return " ".join(text.split())
+
+    def remove_punc(text):
+        exclude = set(string.punctuation)
+        return "".join(ch for ch in text if ch not in exclude)
+
+    def lower(text):
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))

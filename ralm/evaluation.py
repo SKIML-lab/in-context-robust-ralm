@@ -34,7 +34,7 @@ def cal_unans(dataset: Dataset, args):
     )
 
     # metrics to dataframe
-    df = df[["question", "answers", "prompt", "pred", "hasanswer", "answerable", "answerable_acc"]]
+    df = df[["question", "answers", "prompt", "pred", "hasanswer", "answerable"]]
     wandb.log({"metrics": wandb.Table(dataframe=pd.DataFrame(data=metrics, index=[0]))})
     wandb.log({"raw output": wandb.Table(dataframe=df)})
     df["ctxs"] = dataset["ctxs"]
