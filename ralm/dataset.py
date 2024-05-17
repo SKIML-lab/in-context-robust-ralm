@@ -1,4 +1,5 @@
 from datasets import Dataset, load_dataset
+import spacy, re
 from tqdm.auto import tqdm
 from utils import SimpleTokenizer, has_answer
 import numpy as np
@@ -6,6 +7,7 @@ import faiss, os, joblib, random
 from transformers import AutoTokenizer, DPRQuestionEncoder, DPRContextEncoder
 from preprocess import normalize_answer
 from typing import List, Dict
+from collections import defaultdict
 
 def dpr_embed(dataset: Dataset, col: str, args) -> list[np.ndarray]: 
     import torch    
@@ -40,6 +42,17 @@ def dpr_embed(dataset: Dataset, col: str, args) -> list[np.ndarray]:
         joblib.dump(normalized_arrays, f"data/index/{args.case_dataset.split('/')[-1]}_{col}_embeddings.pkl")
         print(f"{col} embeddings saved")
     return normalized_arrays, inputs
+
+def build_multiple_indexes(input_dict: Dict, subsets: List[str]):
+    output = dict()
+    for subset in subsets:
+        if (input_dict.get(subset) == []) or (input_dict.get(subset) == None):
+            continue
+        else:
+            rows, embeddings = [d[0] for d in input_dict[subset]], [d[1] for d in input_dict[subset]]
+            index = build_index_with_ids(np.array(embeddings), "data/index/", subset, is_save=False, gpu_id=-100)
+            output.update({subset:{"index":index, "id2q":{_id:row for _id, row in zip(np.arange(len(embeddings)).astype('int64'), rows)}}})
+    return output
 
 def build_index_with_ids(vectors: np.ndarray, save_dir: str, name: str, is_save: bool = True, gpu_id: int =0):
     index_flat = faiss.IndexFlatIP(len(vectors[0]))
@@ -157,6 +170,8 @@ def find_random_contexts(dataset: Dataset):
     return dataset
 
 def check_alias(entity: str, answers: List[str]):
+    if isinstance(answers, dict):
+        answers = answers["text"]
     for answer in answers:
         if normalize_answer(entity) in normalize_answer(answer) or normalize_answer(answer) in normalize_answer(entity):
             return True
@@ -165,23 +180,23 @@ def check_alias(entity: str, answers: List[str]):
 def find_similar_entity(dataset: Dataset, args, entities_groupby_type: Dict[str, List], indexs: Dict):
     output = []
     scores = []
-    for row in tqdm(dataset, desc="Generating similar entity", total=len(dataset)):
-        entity_type = row["entity"]
+    for row in tqdm(dataset, desc="Find similar entity", total=len(dataset)):
+        entity_type = row["entity_type"]
         index = indexs[entity_type]
         entity_set = entities_groupby_type[entity_type]
         query = np.array([row["entity_vector"]]).astype("float32")
         distances, indices = index.search(query, 100)
         hit = False
         for score, idx in zip(distances[0], indices[0]):
-            if score < args.threshold:
-                if check_alias(entity_set[idx], row[args.ans_col]):
+            if score < 0.8:
+                if check_alias(entity_set[idx], row["answers"]):
                     continue
                 hit = True
                 output.append(entity_set[idx])
                 scores.append(score)
                 break
         if not hit:
-            if check_alias(entity_set[indices[0][-1]], row[args.ans_col]):
+            if check_alias(entity_set[indices[0][-1]], row["answers"]):
                 output.append(None)
                 scores.append(None)
             else:
@@ -191,12 +206,12 @@ def find_similar_entity(dataset: Dataset, args, entities_groupby_type: Dict[str,
 
 def find_random_entity(dataset: Dataset, entities_groupby_type: Dict[str, List], args):
     output = []
-    for row in tqdm(dataset, desc="Generating random entity", total=len(dataset)):
+    for row in tqdm(dataset, desc="Find random entity", total=len(dataset)):
         max_cnt = 0
-        entity_type = row["entity"]
+        entity_type = row["entity_type"]
         entity_set = entities_groupby_type[entity_type]
         random_entity = random.choice(entity_set)
-        while check_alias(random_entity, row[args.ans_col]) and max_cnt < 50:
+        while check_alias(random_entity, row["answers"]) and max_cnt < 50:
             max_cnt += 1
             random_entity = random.choice(entity_set)
         if max_cnt >= 50:
@@ -215,7 +230,7 @@ def is_valid_entity(entity: str, label: str) -> bool:
     return True
 
 def make_entity_set(args) -> None:
-    import spacy, torch
+    import torch
     from collections import defaultdict
     spacy.prefer_gpu()
     dataset = load_dataset("wikitext","wikitext-103-raw-v1",split="train")
@@ -262,3 +277,114 @@ def make_entity_set(args) -> None:
         print("Entity pool saved!")
         print("Saved path: ./data/entity/entity_group_vec.pkl")
     return valid_entity_group, entities_to_vector
+
+def detect_entity_type(dataset: Dataset, col_name: str):
+    spacy.prefer_gpu()
+    res = []
+    nlp = spacy.load("en_core_web_trf")
+    entities = defaultdict(list)
+    inputs = dataset[col_name]
+    answers = dataset["answers"]
+    for i in tqdm(range(0, len(inputs), 2048), desc="Detecting entity types..."):
+        batch = inputs[i:i+2048]
+        batch_answers = answers[i:i+2048]
+        docs = list(nlp.pipe(batch, batch_size=2048))
+        for doc, ans in zip(docs, batch_answers):
+            hit = False
+            if doc.ents:
+                for ent in doc.ents:
+                    entities[ent.label_].append(ent.text)
+                    if not hit and normalize_answer(ent.text) == normalize_answer(ans["text"][0]):
+                        res.append(ent.label_)
+                        hit = True
+            if not hit:
+                res.append(None)
+    dataset = dataset.add_column("entity_type", res)
+    return dataset
+
+def detect_entities(dataset: Dataset, col_name: str):
+    spacy.prefer_gpu()
+    nlp = spacy.load("en_core_web_trf")
+    validated_inputs = [x if x is not None else "" for x in dataset[in_col]]
+    docs = list(nlp.pipe(validated_inputs))
+    ents, ents_count = [],[]
+    for doc in docs:
+        if doc.ents:
+            ents.append(", ".join(['"'+ent.text+'"' for ent in doc.ents]))
+            ents_count.append(len(doc.ents))
+        else:
+            ents.append(None)
+            ents_count.append(0)
+    dataset = dataset.add_column(out_col, ents)
+    dataset = dataset.add_column(out_col+"_count", ents_count)
+    return dataset
+
+def gen_entity_vector(dataset: Dataset, col_name: str):
+    spacy.prefer_gpu()
+    nlp = spacy.load("en_core_web_lg")
+    entities = dataset[col_name]
+    if isinstance(entities[0], list):
+        entities = [ent[0] for ent in entities]
+    elif isinstance(entities[0], dict):
+        entities = [ent["text"][0] for ent in entities]
+    vectors = []
+    for i in tqdm(range(0, len(entities), 2048), desc="Generating entity vector..."):
+        batch = entities[i:i+2048]
+        docs = list(nlp.pipe(batch, batch_size=2048))
+        vectors.extend([doc.vector.get() for doc in docs])
+    vectors = [v/np.linalg.norm(v) if not np.isnan(v).any() else None for v in vectors]
+    dataset = dataset.add_column("entity_vector", vectors)
+    return dataset
+
+def cal_cosine_similarities(queries_vector: List[np.ndarray], entities: List[str], args):
+    def cosine_similarity(a, b):
+        if not isinstance(b, np.ndarray):
+            b = b.get()
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    import spacy
+    scores = []
+    nlp = spacy.load("en_core_web_lg")
+    assert len(queries_vector) == len(entities), "Length of queries and entities should be same"
+    for query_vec, entity in tqdm(
+        zip(queries_vector, entities), desc="Calculating cosine similarity", total=len(queries_vector)
+        ):
+        if not entity:
+            scores.append(None)
+            continue
+        doc = nlp(entity)
+        scores.append(cosine_similarity(query_vec, doc.vector))
+    return scores
+
+def find_answer_in_context(answer_text: str, context: str):
+    if isinstance(context, str):
+        context_spans = [
+            (m.start(), m.end())
+            for m in re.finditer(re.escape(answer_text.lower()), context.lower())
+        ]
+        return context_spans
+    else:
+        return [""]
+
+def update_context_with_substitution_string(
+    context: str, originals:List[str], substitution: str, replace_every_string=True
+) -> str:
+    replace_spans = []
+    if isinstance(originals, dict):
+        originals = originals["text"]
+    for orig_answer in originals:
+        replace_spans.extend(find_answer_in_context(orig_answer, context))
+    replace_strs = set([context[span[0] : span[1]] for span in replace_spans])
+    for replace_str in replace_strs:
+        context = context.replace(replace_str, substitution)
+    return context
+
+def perturbate_context(ex: dict, args):
+    if args.task != "conflict":
+        return {"ctxs": ex["ctxs"]}
+    random.seed(42)
+    ctxs = ex["ctxs"]
+    if ex["is_valid_conflict_passage"]:
+        ctxs.insert(random.randint(0, len(ctxs)), {"text": ex["gpt_conflict_passage"][0], "hasanswer": False, "is_conflict": True})
+        return {"ctxs": ctxs}
+    else:
+        return {"ctxs": ctxs}

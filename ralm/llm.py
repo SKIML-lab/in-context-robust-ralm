@@ -1,6 +1,7 @@
 from openai import OpenAI
 from typing import List
 from vllm import LLM, SamplingParams
+import time
 
 LLAMA3_CHAT = ("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
                "You are a helpful assistant who follows instructions well.<|eot_id|>"
@@ -33,6 +34,29 @@ def gpt_chat_completion(prompt: str, args, client = None):
                 return None
             cnt += 1
     return response.choices[0].message.content.strip()
+
+def gpt_completion(prompt: str, args, client = None):
+    if not client:
+        client = OpenAI()
+    cnt = 0
+    while True:
+        try:
+            response = client.completions.create(
+                model="gpt-3.5-turbo-instruct",
+                prompt=prompt,
+                seed=42,
+                temperature=0,
+                max_tokens=args.max_new_tokens
+            )
+            break
+        except Exception as e:
+            print(e)
+            print("Failed to get response")
+            time.sleep(1)
+            if cnt >= 3:
+                return None
+            cnt += 1
+    return response.choices[0].text.strip()
 
 def vllm_completion(prompts: List[str], args) -> List[str]:
     import torch

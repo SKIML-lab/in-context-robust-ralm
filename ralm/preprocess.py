@@ -74,8 +74,6 @@ def remove_duplicate(data: Dataset):
     filtered_data = data.select(result_idxs, writer_batch_size=50000)
     return filtered_data
 
-
-
 def split_sentence_and_make_short_context(dataset: Dataset, nlp):
     simple_tokenizer = SimpleTokenizer()
     answer_passages = []
